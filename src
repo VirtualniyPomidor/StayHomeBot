@@ -1,0 +1,166 @@
+import threading
+import requests as r
+import sqlite3 as sq
+import telebot
+import schedule
+import time
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+from datetime import datetime
+
+bot_key = ''
+weather_key = ''
+giphy_key = ''
+
+bot = telebot.TeleBot(bot_key)
+
+def keyb():
+    keyboard = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
+    button_1 = telebot.types.KeyboardButton(text='Москва')
+    button_2 = telebot.types.KeyboardButton(text='Санкт-Петербург')
+    button_3 = telebot.types.KeyboardButton(text='Екатеринбург')
+    button_4 = telebot.types.KeyboardButton(text='Нью-Йорк')
+    button_5 = telebot.types.KeyboardButton(text='Париж')
+    button_6 = telebot.types.KeyboardButton(text='Лондон')
+    keyboard.row(button_1, button_2, button_3)
+    keyboard.row(button_4, button_5, button_6)
+    return keyboard
+
+def get_weather(city):
+    weather_info = (r.get('http://api.openweathermap.org/data/2.5/weather', params={'q': city, 'units': 'metric', 'lang': 'ru', 'APPID': weather_key})).json()
+    weather_list = [weather_info['main']['temp'], weather_info['wind']['speed'], weather_info['weather'][0]['description'], weather_info['weather'][0]['main']]
+    return weather_list
+
+def get_giphy_link(gif_tag):
+    global weather_key
+    try:
+        response = r.get('http://api.giphy.com/v1/gifs/random', params={'api_key': giphy_key, 'tag': gif_tag, 'rating': 'g'})
+        data = response.json()
+        if data['data']:
+            gif_url = data['data']['images']['original']['url']
+            return gif_url
+        else:
+            return None
+    except:
+        Exception
+
+def bot_main():
+    @bot.message_handler(commands=['start'])
+    def start_message(message):
+        connection = sq.connect('db.db')
+        cursor = connection.cursor()
+        cursor.execute('create table if not exists Data (Id int, City text, Time time)')
+        connection.commit()
+        cursor.close()
+        connection.close()
+        keyboard = keyb()
+        bot.send_message(message.chat.id, 'Сейчас зарегистрируем вас! Где вы живете?', reply_markup=keyboard)
+        bot.register_next_step_handler(message, set_city)
+
+    def set_city(message):
+        name = message.text.strip()
+        connection = sq.connect('db.db')
+        cursor = connection.cursor()
+        keyboard = telebot.types.ReplyKeyboardRemove()
+        if (cursor.execute(f'select exists (select id from data where id = {message.chat.id})').fetchall())[0][0] == 0:
+            cursor.execute("INSERT INTO Data (id, City) VALUES (?, ?)", (message.chat.id, name))
+            cursor.execute('COMMIT')
+        else:
+            cursor.execute('update data set city = ? where id = ?', (name, message.chat.id))
+            cursor.execute('COMMIT')
+
+        connection.commit()
+        cursor.close()
+        connection.close()
+        bot.send_message(message.chat.id, 'В какое время присылать вам уведомление? Укажите час в 24-часовом формате', reply_markup=keyboard)
+        bot.register_next_step_handler(message, set_time)
+
+    def set_time(message):
+        time = message.text.strip()
+        connection = sq.connect('db.db')
+        cursor = connection.cursor()
+        try:
+            time = int(time)
+            if time in range(0, 61): # 61 Изменить на 25 для корректности
+                if (cursor.execute(f'select exists (select id from data where id = {message.chat.id})').fetchall())[0][0] == 0:
+                    cursor.execute("INSERT INTO Data (id, time) VALUES (?, ?)", (message.chat.id, time))
+                    cursor.execute('COMMIT')
+                else:
+                    cursor.execute('update data set time = ? where id = ?', (time, message.chat.id))
+                    cursor.execute('COMMIT')
+                    bot.send_message(message.chat.id, 'Отлично, данные сохранены')
+            else:
+                markup = InlineKeyboardMarkup()
+                markup.add(InlineKeyboardButton(text='*Попробовать еще раз*', callback_data='try_again'))
+                bot.send_message(message.chat.id, 'Кажется, время не в промежутке от 0 до 24. Попробуйте еще раз', reply_markup=markup)
+
+        except:
+            markup = InlineKeyboardMarkup()
+            markup.add(InlineKeyboardButton(text='*Попробовать еще раз*', callback_data='try_again'))
+            bot.send_message(message.chat.id, 'Кажется, время указано в неправильном формате. Попробуйте еще раз', reply_markup=markup)
+        connection.commit()
+        cursor.close()
+        connection.close()
+
+    @bot.message_handler(content_types=["text"])
+    def hi_text(message):
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton(text='*Попробовать еще раз*', callback_data='try_again'))
+        bot.send_message(message.chat.id, "Привет, попробуй ввести команду /start, чтобы начать", reply_markup=markup)
+
+    @bot.callback_query_handler(func=lambda callback: True)
+    def answer(call):
+        if call.data == 'try_again':
+            start_message(call.message)
+
+    bot.polling()
+
+def bot_schedule():
+    def repeating_task():
+        global bot
+        connection = sq.connect('db.db')
+        cursor = connection.cursor()
+        cursor.execute('select count(*) from data')
+        counter = cursor.fetchall()[0][0]
+        connection.commit()
+        cursor.close()
+        connection.close()
+
+        for i in range(counter):
+            connection = sq.connect('db.db')
+            cursor = connection.cursor()
+            cursor.execute('select * from data where exists (select * from data)')
+            output = cursor.fetchall()
+            counter_id = output[i][0]
+            counter_city = output[i][1]
+
+            if output[i][2] == datetime.now().minute:
+                try:
+                    info = get_weather(counter_city)
+                    bot.send_message(counter_id, f'Сейчас в городе {output[i][1]} — {info[2]};\nСкорость ветра — {info[1]} м/c;\nТемпература — {info[0]}℃.')
+                    if (info[3] in ['Shower rain', 'Rain', 'Thunderstorm', 'Snow']) or (info[1] > 10) or (info[0] < -15) or (info[0]>30):
+                        try:
+                            bot.send_video(counter_id, get_giphy_link(f'weather {info[3]}'))
+                        except:
+                            print('gif errors')
+                            Exception
+                        bot.send_message(counter_id, 'Погода не очень, лучше посидеть дома (Простите, если гифка плохо подходит...)')
+                except:
+                    bot.send_message(counter_id, 'Что-то пошло не так, отправка погоды невозможна')
+                print(f'Running repeating task; id: {counter_id}; city: {counter_city}; i: {i}.')
+
+            connection.commit()
+            cursor.close()
+            connection.close()
+
+    # !!! Заменить на schedule.every(1).hours.do(repeating_task) для корректной работы, это демонстративный вариант
+    schedule.every(1).minutes.do(repeating_task)
+    while True:
+        schedule.run_pending()
+        time.sleep(1)
+
+thread1 = threading.Thread(target=bot_main)
+thread2 = threading.Thread(target=bot_schedule)
+thread1.start()
+thread2.start()
+thread1.join()
+thread2.join()
