@@ -1,0 +1,10 @@
+from add import *
+
+thread1 = threading.Thread(target=bot_main)
+thread2 = threading.Thread(target=bot_schedule)
+
+thread1.start()
+thread2.start()
+
+thread1.join()
+thread2.join()
